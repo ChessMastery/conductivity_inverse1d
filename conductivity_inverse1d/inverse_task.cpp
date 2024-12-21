@@ -19,11 +19,9 @@ void inverse_task_init(inverse_task_data& inv_struct, direct_task_data& experime
       std::cerr << "could not open file inv_input/inv_input.txt" << std::endl;
       throw std::runtime_error("could not open file inv_input/inv_input.txt");
    }
-   double init_sigma = 0.0, sigma_delta = 0.0, init_height = 0.0;
-   inv_in >> sigma_delta >> init_height;
+   double init_sigma = 0.0, init_height = 0.0;
+   inv_in >> init_sigma >> init_height;
    inv_in.close();
-   init_sigma = sigma + sigma_delta;
-   init_height = init_height;
 
    inv_struct.init_appr.sigmas.resize(experiment_info.layers_sigma.size() - 1);
    for (int i = 0; i < inv_struct.init_appr.sigmas.size(); i++)
@@ -42,6 +40,16 @@ void inverse_task_init(inverse_task_data& inv_struct, direct_task_data& experime
    inv_struct.acc_r = experiment_info.src_r, inv_struct.acc_z = experiment_info.src_z;
 }
 
+double calc_functional(vector<double>& eds_u0, vector<double>& synthetic_eds, vector<double>& weights)
+{
+   double res = 0.0;
+   for (int i = 0; i < synthetic_eds.size(); i++)
+   {
+      res += weights[i] * weights[i] * (eds_u0[i] - synthetic_eds[i]) * (eds_u0[i] - synthetic_eds[i]);
+   }
+   return res;
+}
+
 void inverse_task_solve(inverse_task_data& inv_struct, vector<double>& synthetic_eds, mesh& carcass,
    direct_task_data& dtd_synth, direct_task_data& dtd_prim) // large and awkward function, to be splitted into smaller ones
 {
@@ -58,11 +66,11 @@ void inverse_task_solve(inverse_task_data& inv_struct, vector<double>& synthetic
 
    direct_task_data u0_calc_data;
    vector<vector<double>> eds(u0.size());
-   vector<double> alpha_vec(u0.size(), 3e-8), beta(u0.size(), 7e-2);
+   vector<double> alpha_vec(u0.size(), 1e-9), beta(u0.size(), 2e-2); // 7e-2
    vector<double> regv, deltau, u_next, u_new, eds_u0;
 
    // calculate functional
-   double J_old = 0.0, J_new = 0.0;
+   //double J_old = 0.0, J_new = 0.0;
    // iterative process
    int it_max = 100;
    for (int it = 0; it < it_max; it++)
@@ -78,16 +86,12 @@ void inverse_task_solve(inverse_task_data& inv_struct, vector<double>& synthetic
       dtd_init_from_paramvec(u0_calc_data, u0, carcass, dtd_synth);
       solve_direct(u0_calc_data, dtd_prim);
       calculate_eds(u0_calc_data, dtd_prim, eds_u0);
-      J_old = J_new;
-      J_new = 0.0;
-      for (int i = 0; i < synthetic_eds.size(); i++)
-      {
-         J_new += weights[i] * weights[i] * (eds_u0[i] - synthetic_eds[i]) * (eds_u0[i] - synthetic_eds[i]);
-      }
-      std::cout << it << " " << J_new << " ";
-      for (int i = 0; i < u0.size(); i++)
-         std::cout << u0[i] << " ";
-      std::cout << std::endl;
+      //J_old = J_new;
+      //J_new = calc_functional(eds_u0, synthetic_eds, weights);
+      //std::cout << it << " " << J_new << " ";
+      //for (int i = 0; i < u0.size(); i++)
+      //   std::cout << u0[i] << " ";
+      //std::cout << std::endl;
       for (int i = 0; i < u0.size(); i++)
       {
          vector<double> u_new = u0;
@@ -142,6 +146,7 @@ void inverse_task_solve(inverse_task_data& inv_struct, vector<double>& synthetic
       gauss_v2(A, deltau, f, f.size(), 1e-15);
 
       bool beta_reset_flag = true;
+      for (int i = 0; i < beta.size(); i++) beta[i] = 1e-1;
       while (beta_reset_flag)
       {
          u_next = u0;
@@ -162,8 +167,103 @@ void inverse_task_solve(inverse_task_data& inv_struct, vector<double>& synthetic
             std::cout << "beta_reset" << std::endl;
       }
 
+      double J = 0.0;
+      direct_task_data tmp_calc_data;
+      dtd_init_from_paramvec(tmp_calc_data, u_next, carcass, dtd_synth);
+      solve_direct(tmp_calc_data, dtd_prim);
+      vector<double> eds_tmp;
+      calculate_eds(tmp_calc_data, dtd_prim, eds_tmp);
+      J = calc_functional(eds_tmp, synthetic_eds, weights);
+      std::cout << it << " " << J << " ";
+      for (int i = 0; i < u_next.size(); i++)
+         std::cout << u_next[i] << " ";
+      std::cout << std::endl;
+
+      vector<double> u_next2, u_change;
+      int max_decrease_beta = 5, dcr_cnt = 0;
+      for (int i = 0; i < max_decrease_beta; i++)
+      {
+         auto beta2 = beta;
+         for (int i = 0; i < beta.size(); i++)
+            beta2[i] /= 2.0;
+         u_next2 = u0;
+         for (int i = 0; i < u0.size(); i++)
+            u_next2[i] += beta2[i] * deltau[i];
+         bool incorrect = false;
+         for (int j = 0; j < u_next2.size(); j++)
+            if (u_next2[j] < 0.0)
+               incorrect = true;
+         if (incorrect) break;
+         direct_task_data next2_calc_data;
+         dtd_init_from_paramvec(next2_calc_data, u_next2, carcass, dtd_synth);
+         solve_direct(next2_calc_data, dtd_prim);
+         vector<double> eds_next2;
+         calculate_eds(next2_calc_data, dtd_prim, eds_next2);
+         double J_tmp = calc_functional(eds_next2, synthetic_eds, weights);
+         if (J_tmp < J)
+         {
+            J = J_tmp;
+            std::cout << it << " " << J << " ";
+            for (int i = 0; i < u_next2.size(); i++)
+               std::cout << u_next2[i] << " ";
+            std::cout << std::endl;
+            for (int i = 0; i < beta.size(); i++)
+               beta[i] /= 2;
+            dcr_cnt++;
+            u_change = u_next2;
+         }
+         else
+         {
+            break;
+         }
+      }
+
+      int max_increase_beta = 5, incr_cnt = 0;
+      for (int i = 0; i < max_increase_beta; i++)
+      {
+         auto beta2 = beta;
+         for (int j = 0; j < beta.size(); j++)
+            beta2[j] *= 2.0;
+         u_next2 = u0;
+         for (int j = 0; j < u0.size(); j++)
+            u_next2[j] += beta2[j] * deltau[j];
+         bool incorrect = false;
+         for (int j = 0; j < u_next2.size(); j++)
+            if (u_next2[j] < 0.0)
+               incorrect = true;
+         if (incorrect) break;
+         direct_task_data next2_calc_data;
+         dtd_init_from_paramvec(next2_calc_data, u_next2, carcass, dtd_synth);
+         solve_direct(next2_calc_data, dtd_prim);
+         vector<double> eds_next2;
+         calculate_eds(next2_calc_data, dtd_prim, eds_next2);
+         double J_tmp = calc_functional(eds_next2, synthetic_eds, weights);
+         if (J_tmp < J)
+         {
+            J = J_tmp;
+            std::cout << it << " " << J << " ";
+            for (int i = 0; i < u_next2.size(); i++)
+               std::cout << u_next2[i] << " ";
+            std::cout << std::endl;
+            for (int i = 0; i < beta.size(); i++)
+               beta[i] *= 2;
+            incr_cnt++;
+            u_change = u_next2;
+         }
+         else
+         {
+            break;
+         }
+      }
+
+      std::cout << "decrease steps = " << dcr_cnt << ", increase steps = " << incr_cnt << std::endl;
+
+
       regv = u0;
-      u0 = u_next;
+      if (dcr_cnt || incr_cnt)
+         u0 = u_change;
+      else
+         u0 = u_next;
    }
 
    std::cout << "stopped" << std::endl;
